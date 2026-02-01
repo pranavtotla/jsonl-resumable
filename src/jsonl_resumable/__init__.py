@@ -37,7 +37,7 @@ from .exceptions import (
 from .index import JsonlIndex
 from .models import IndexMeta, JobInfo, LineInfo
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __all__ = [
     # Core
     "JsonlIndex",
