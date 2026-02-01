@@ -24,7 +24,7 @@ from .exceptions import InvalidCheckpointError, StaleCheckpointError
 from .index import JsonlIndex
 from .models import IndexMeta, JobInfo, LineInfo
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = [
     "JsonlIndex",
     "IndexMeta",

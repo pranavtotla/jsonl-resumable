@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jsonl-resumable"
-version = "0.3.0"
+version = "0.4.0"
 description = "O(1) resume for large JSONL streams via byte-offset indexing"
 readme = "README.md"
 license = "MIT"

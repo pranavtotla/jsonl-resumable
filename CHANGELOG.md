@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-01
+
+### Added
+
+- **Resumable batch processing** with checkpoint persistence:
+  - `batch_processor(job_id)` - Context manager for resumable iteration
+  - `checkpoint()` - Persist progress to disk during processing
+  - Auto-resume from last checkpoint on re-entry
+  - Marks job complete only when fully exhausted without error
+- **Job management methods**:
+  - `list_jobs()` - List all jobs for a file
+  - `get_job(job_id)` - Get info about a specific job
+  - `reset_job(job_id)` - Reset job to start from beginning
+  - `delete_job(job_id)` - Remove job progress record
+  - `delete_completed_jobs()` - Clean up finished jobs
+- **New data models**:
+  - `JobProgress` - Internal state for tracking job progress
+  - `JobInfo` - Read-only view of job status exposed to users
+- **Custom exceptions**:
+  - `StaleCheckpointError` - File modified since last checkpoint
+  - `InvalidCheckpointError` - Checkpoint position exceeds total lines
+
+### Fixed
+
+- Flaky timing test in `test_large_files.py` with tolerance margin
+
 ## [0.3.0] - 2026-02-01
 
 ### Added
@@ -50,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Checkpoints** - Configurable sparse checkpoints for memory/speed tradeoff
 - **Data models** - `LineInfo` and `IndexMeta` for index structure
 
+[0.4.0]: https://github.com/pranavtotla/jsonl-resumable/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pranavtotla/jsonl-resumable/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/pranavtotla/jsonl-resumable/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/pranavtotla/jsonl-resumable/releases/tag/v0.1.0
