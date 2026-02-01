@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Iterator, Union
+from typing import IO, Any, Iterator, Union
 
 from .models import IndexMeta, LineInfo
 from .persistence import load_index, save_index
@@ -31,6 +31,7 @@ class JsonlIndex:
         checkpoint_interval: int = 100,
         index_path: Union[str, Path, None] = None,
         auto_save: bool = True,
+        keep_open: bool = False,
     ) -> None:
         """Create or load an index for a JSONL file.
 
@@ -40,16 +41,22 @@ class JsonlIndex:
                 faster seeking; higher = less memory, slightly slower seeking)
             index_path: Where to persist the index. Defaults to {file_path}.idx
             auto_save: Automatically save index after building
+            keep_open: Keep file handle open for repeated reads (use with context manager)
         """
         self._file_path = Path(file_path).resolve()
         self._checkpoint_interval = checkpoint_interval
         self._index_path = Path(index_path) if index_path else self._file_path.with_suffix(".idx")
         self._auto_save = auto_save
+        self._keep_open = keep_open
+        self._file_handle: IO[bytes] | None = None
 
         self._meta: IndexMeta | None = None
         self._lines: list[LineInfo] = []
 
         self._load_or_build()
+
+        if keep_open:
+            self._file_handle = open(self._file_path, "rb")
 
     def _load_or_build(self) -> None:
         """Load existing index if fresh, otherwise build new one."""
@@ -168,7 +175,7 @@ class JsonlIndex:
         with self.open() as f:
             return self.seek_line(f, line_number)
 
-    def read_json(self, line_number: int) -> dict | list:
+    def read_json(self, line_number: int) -> Any:
         """Read and parse a specific line as JSON.
 
         Args:
@@ -182,6 +189,42 @@ class JsonlIndex:
             json.JSONDecodeError: If line is not valid JSON
         """
         return json.loads(self.read_line(line_number))
+
+    def read_line_many(self, line_numbers: list[int]) -> list[str]:
+        """Read multiple lines with a single file open.
+
+        More efficient than calling read_line() in a loop when you need
+        multiple random lines, as it opens the file only once.
+
+        Args:
+            line_numbers: List of 0-indexed line numbers
+
+        Returns:
+            List of line contents in the same order as requested
+
+        Raises:
+            IndexError: If any line_number is out of range
+        """
+        with self.open() as f:
+            return [self.seek_line(f, n) for n in line_numbers]
+
+    def read_json_many(self, line_numbers: list[int]) -> list[Any]:
+        """Read and parse multiple lines as JSON with a single file open.
+
+        More efficient than calling read_json() in a loop when you need
+        multiple random records, as it opens the file only once.
+
+        Args:
+            line_numbers: List of 0-indexed line numbers
+
+        Returns:
+            List of parsed JSON objects in the same order as requested
+
+        Raises:
+            IndexError: If any line_number is out of range
+            json.JSONDecodeError: If any line is not valid JSON
+        """
+        return [json.loads(line) for line in self.read_line_many(line_numbers)]
 
     def iter_from(self, start_line: int = 0) -> Iterator[str]:
         """Iterate lines starting from a specific line.
@@ -206,7 +249,7 @@ class JsonlIndex:
             for line in f:
                 yield line.decode("utf-8").rstrip("\n\r")
 
-    def iter_json_from(self, start_line: int = 0) -> Iterator[dict | list]:
+    def iter_json_from(self, start_line: int = 0) -> Iterator[Any]:
         """Iterate lines as parsed JSON starting from a specific line.
 
         Args:
@@ -222,11 +265,35 @@ class JsonlIndex:
     def open(self) -> Iterator[IO[bytes]]:
         """Open the indexed file for binary reading.
 
+        If keep_open=True was set, reuses the persistent file handle.
+
         Yields:
             File handle in binary read mode
         """
-        with open(self._file_path, "rb") as f:
-            yield f
+        if self._file_handle:
+            yield self._file_handle
+        else:
+            with open(self._file_path, "rb") as f:
+                yield f
+
+    def close(self) -> None:
+        """Close the file handle if keep_open=True was used."""
+        if self._file_handle:
+            self._file_handle.close()
+            self._file_handle = None
+
+    def __enter__(self) -> "JsonlIndex":
+        """Enter context manager."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        """Exit context manager and close file handle."""
+        self.close()
 
     def rebuild(self) -> None:
         """Force rebuild the index, ignoring any cached version."""

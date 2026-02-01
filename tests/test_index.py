@@ -1,7 +1,6 @@
 """Tests for JsonlIndex."""
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -161,7 +160,7 @@ class TestIndexPersistence:
     def test_custom_index_path(self, sample_jsonl: Path, tmp_path: Path):
         """Can use custom index path."""
         custom_path = tmp_path / "custom.idx"
-        index = JsonlIndex(sample_jsonl, index_path=custom_path)
+        JsonlIndex(sample_jsonl, index_path=custom_path)
 
         assert custom_path.exists()
         assert not sample_jsonl.with_suffix(".idx").exists()
@@ -329,7 +328,6 @@ class TestIncrementalUpdate:
     def test_update_saves_index(self, sample_jsonl: Path):
         """update() persists the updated index."""
         index = JsonlIndex(sample_jsonl)
-        index_path = sample_jsonl.with_suffix(".idx")
 
         # Append and update
         with open(sample_jsonl, "a") as f:
@@ -375,3 +373,146 @@ class TestIncrementalUpdate:
 
         assert index.total_lines == 103
         assert index.read_json(102)["batch"] == 2
+
+
+class TestBatchReads:
+    """Tests for read_line_many() and read_json_many()."""
+
+    def test_read_line_many(self, sample_jsonl: Path):
+        """Can read multiple lines with single file open."""
+        index = JsonlIndex(sample_jsonl)
+
+        lines = index.read_line_many([0, 50, 99])
+        assert len(lines) == 3
+        assert '"line": 0' in lines[0]
+        assert '"line": 50' in lines[1]
+        assert '"line": 99' in lines[2]
+
+    def test_read_json_many(self, sample_jsonl: Path):
+        """Can read and parse multiple lines as JSON."""
+        index = JsonlIndex(sample_jsonl)
+
+        data = index.read_json_many([10, 20, 30])
+        assert len(data) == 3
+        assert data[0]["line"] == 10
+        assert data[1]["line"] == 20
+        assert data[2]["line"] == 30
+
+    def test_read_many_empty_list(self, sample_jsonl: Path):
+        """Handles empty list of line numbers."""
+        index = JsonlIndex(sample_jsonl)
+
+        assert index.read_line_many([]) == []
+        assert index.read_json_many([]) == []
+
+    def test_read_many_single_line(self, sample_jsonl: Path):
+        """Handles single line number."""
+        index = JsonlIndex(sample_jsonl)
+
+        lines = index.read_line_many([42])
+        assert len(lines) == 1
+        assert '"line": 42' in lines[0]
+
+    def test_read_many_out_of_range(self, sample_jsonl: Path):
+        """Raises IndexError for out-of-range line numbers."""
+        index = JsonlIndex(sample_jsonl)
+
+        with pytest.raises(IndexError):
+            index.read_line_many([0, 100])  # 100 is out of range
+
+    def test_read_many_preserves_order(self, sample_jsonl: Path):
+        """Results are in same order as requested line numbers."""
+        index = JsonlIndex(sample_jsonl)
+
+        # Request in non-sequential order
+        data = index.read_json_many([99, 0, 50])
+        assert data[0]["line"] == 99
+        assert data[1]["line"] == 0
+        assert data[2]["line"] == 50
+
+    def test_read_many_with_duplicates(self, sample_jsonl: Path):
+        """Handles duplicate line numbers."""
+        index = JsonlIndex(sample_jsonl)
+
+        data = index.read_json_many([5, 5, 5])
+        assert len(data) == 3
+        assert all(d["line"] == 5 for d in data)
+
+
+class TestKeepOpen:
+    """Tests for keep_open mode."""
+
+    def test_keep_open_basic(self, sample_jsonl: Path):
+        """Can read with keep_open=True."""
+        index = JsonlIndex(sample_jsonl, keep_open=True)
+
+        assert index.read_json(0)["line"] == 0
+        assert index.read_json(50)["line"] == 50
+
+        index.close()
+
+    def test_keep_open_context_manager(self, sample_jsonl: Path):
+        """Context manager closes file handle."""
+        with JsonlIndex(sample_jsonl, keep_open=True) as index:
+            assert index.read_json(0)["line"] == 0
+            assert index._file_handle is not None
+
+        # After context exit, handle should be closed
+        assert index._file_handle is None
+
+    def test_keep_open_explicit_close(self, sample_jsonl: Path):
+        """Can explicitly close file handle."""
+        index = JsonlIndex(sample_jsonl, keep_open=True)
+        assert index._file_handle is not None
+
+        index.close()
+        assert index._file_handle is None
+
+    def test_keep_open_close_idempotent(self, sample_jsonl: Path):
+        """close() is safe to call multiple times."""
+        index = JsonlIndex(sample_jsonl, keep_open=True)
+
+        index.close()
+        index.close()  # Should not raise
+
+    def test_keep_open_reuses_handle(self, sample_jsonl: Path):
+        """Verifies the same handle is reused."""
+        with JsonlIndex(sample_jsonl, keep_open=True) as index:
+            # Access the file handle
+            with index.open() as f1:
+                handle_id = id(f1)
+
+            # Should be the same handle
+            with index.open() as f2:
+                assert id(f2) == handle_id
+
+    def test_without_keep_open_creates_new_handles(self, sample_jsonl: Path):
+        """Without keep_open, each open() creates new handle."""
+        index = JsonlIndex(sample_jsonl, keep_open=False)
+
+        # Each open() should create a new handle
+        with index.open():
+            pass
+
+        # No persistent handle
+        assert index._file_handle is None
+
+    def test_context_manager_without_keep_open(self, sample_jsonl: Path):
+        """Context manager works without keep_open."""
+        with JsonlIndex(sample_jsonl) as index:
+            assert index.read_json(0)["line"] == 0
+
+        # close() is a no-op without keep_open
+        assert index._file_handle is None
+
+    def test_keep_open_with_batch_reads(self, sample_jsonl: Path):
+        """keep_open works with batch read methods."""
+        with JsonlIndex(sample_jsonl, keep_open=True) as index:
+            data = index.read_json_many([0, 50, 99])
+            assert len(data) == 3
+
+    def test_keep_open_iter_from(self, sample_jsonl: Path):
+        """keep_open works with iter_from."""
+        with JsonlIndex(sample_jsonl, keep_open=True) as index:
+            lines = list(index.iter_from(95))
+            assert len(lines) == 5
