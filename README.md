@@ -69,6 +69,10 @@ index[1000]                  # same as read_line
 index.iter_json_from(5000)   # yields parsed JSON
 index.iter_from(5000)        # yields raw strings
 
+# Async iteration (for web frameworks)
+async for event in index.aiter_json_from(5000):
+    await process(event)
+
 # When the file grows
 index.update()               # indexes new lines, returns count added
 
@@ -106,6 +110,43 @@ print(index.total_lines)  # 1050
 ```
 
 `update()` picks up where the index left off and only scans the new bytes.
+
+## Async streaming
+
+If you're building a web API and want to stream JSONL data without blocking, there's async support:
+
+```python
+from jsonl_resumable import JsonlIndex
+
+index = JsonlIndex("events.jsonl")
+
+# Basic async iteration
+async for event in index.aiter_json_from(start_line):
+    await process(event)
+
+# With a context manager (validates file state, guarantees cleanup)
+async with index.async_stream(start_line=1000, limit=500) as stream:
+    async for event in stream:
+        await send_to_client(event)
+    print(f"Sent {stream.yielded_count} events")
+```
+
+Works with FastAPI, Starlette, aiohttp, etc. The async methods use batched I/O internally—reading 100 lines per thread hop instead of one at a time—so you're not paying for a context switch on every line.
+
+**Handling bad data:**
+
+```python
+# Skip lines that aren't valid JSON
+async for event in index.aiter_json_from(0, on_decode_error="skip"):
+    process(event)
+
+# Or get the raw string for invalid lines
+async for event in index.aiter_json_from(0, on_decode_error="raw"):
+    if isinstance(event, str):
+        log_bad_line(event)
+    else:
+        process(event)
+```
 
 ## How it works
 
@@ -151,6 +192,26 @@ for line in index.iter_from(index.total_lines - 100):
     print(line)
 ```
 
+**FastAPI streaming endpoint:**
+
+```python
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from jsonl_resumable import JsonlIndex
+import json
+
+app = FastAPI()
+index = JsonlIndex("events.jsonl")
+
+@app.get("/events/stream")
+async def stream_events(start: int = 0):
+    async def generate():
+        async with index.async_stream(start_line=start) as stream:
+            async for event in stream:
+                yield f"data: {json.dumps(event)}\n\n"
+    return StreamingResponse(generate(), media_type="text/event-stream")
+```
+
 ## FAQ
 
 **How big is the index file?**
@@ -168,6 +229,10 @@ Reads are fine from multiple threads. Don't call `update()` or `rebuild()` concu
 **Why not linecache?**
 
 `linecache` loads the entire file into memory. This uses byte offsets so memory usage stays constant regardless of file size.
+
+**Do the async methods actually do async I/O?**
+
+Not exactly. They use `asyncio.to_thread()` to run blocking file reads in a thread pool. This keeps your event loop responsive, but the underlying I/O is still synchronous. For most cases this works well—the batched reads (100 lines per thread hop by default) keep the overhead low.
 
 ## License
 
