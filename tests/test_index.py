@@ -516,3 +516,121 @@ class TestKeepOpen:
         with JsonlIndex(sample_jsonl, keep_open=True) as index:
             lines = list(index.iter_from(95))
             assert len(lines) == 5
+
+
+class TestSampling:
+    """Tests for sample() method."""
+
+    def test_sample_basic(self, sample_jsonl: Path):
+        """Can sample random records."""
+        index = JsonlIndex(sample_jsonl)
+
+        sample = index.sample(10)
+        assert len(sample) == 10
+
+        # All records should be valid JSON objects from the file
+        for record in sample:
+            assert "line" in record
+            assert 0 <= record["line"] < 100
+
+    def test_sample_reproducible_with_seed(self, sample_jsonl: Path):
+        """Same seed produces same sample."""
+        index = JsonlIndex(sample_jsonl)
+
+        sample1 = index.sample(10, seed=42)
+        sample2 = index.sample(10, seed=42)
+
+        assert sample1 == sample2
+
+    def test_sample_different_seeds(self, sample_jsonl: Path):
+        """Different seeds produce different samples."""
+        index = JsonlIndex(sample_jsonl)
+
+        sample1 = index.sample(10, seed=42)
+        sample2 = index.sample(10, seed=123)
+
+        # Very unlikely to be equal with different seeds
+        assert sample1 != sample2
+
+    def test_sample_without_seed(self, sample_jsonl: Path):
+        """Sample without seed uses random selection."""
+        index = JsonlIndex(sample_jsonl)
+
+        # Two samples without seed should be different (statistically)
+        sample1 = index.sample(50)
+        sample2 = index.sample(50)
+
+        # With 50 out of 100, extremely unlikely to be identical
+        assert sample1 != sample2
+
+    def test_sample_n_greater_than_total(self, sample_jsonl: Path):
+        """Requesting more than available returns all lines."""
+        index = JsonlIndex(sample_jsonl)
+
+        sample = index.sample(200)  # Only 100 lines exist
+        assert len(sample) == 100
+
+    def test_sample_all_lines(self, sample_jsonl: Path):
+        """Sampling all lines returns complete set."""
+        index = JsonlIndex(sample_jsonl)
+
+        sample = index.sample(100, seed=42)
+        assert len(sample) == 100
+
+        # Should contain all line numbers (in random order)
+        line_numbers = {record["line"] for record in sample}
+        assert line_numbers == set(range(100))
+
+    def test_sample_single_record(self, sample_jsonl: Path):
+        """Can sample a single record."""
+        index = JsonlIndex(sample_jsonl)
+
+        sample = index.sample(1, seed=42)
+        assert len(sample) == 1
+        assert "line" in sample[0]
+
+    def test_sample_empty_file(self, tmp_path: Path):
+        """Sample from empty file returns empty list."""
+        empty_file = tmp_path / "empty.jsonl"
+        empty_file.touch()
+
+        index = JsonlIndex(empty_file)
+        sample = index.sample(10)
+        assert sample == []
+
+    def test_sample_zero_records(self, sample_jsonl: Path):
+        """Requesting zero records returns empty list."""
+        index = JsonlIndex(sample_jsonl)
+
+        sample = index.sample(0)
+        assert sample == []
+
+    def test_sample_preserves_global_random_state(self, sample_jsonl: Path):
+        """Sampling doesn't affect global random state."""
+        import random
+
+        random.seed(999)
+        before = random.random()
+
+        random.seed(999)
+        index = JsonlIndex(sample_jsonl)
+        index.sample(50, seed=42)  # Should use local RNG
+
+        after = random.random()
+        assert before == after
+
+    def test_sample_single_line_file(self, tmp_path: Path):
+        """Sample from single-line file."""
+        single_file = tmp_path / "single.jsonl"
+        single_file.write_text('{"only": "record"}\n')
+
+        index = JsonlIndex(single_file)
+
+        # Request 1
+        sample = index.sample(1)
+        assert len(sample) == 1
+        assert sample[0] == {"only": "record"}
+
+        # Request more than available
+        sample = index.sample(10)
+        assert len(sample) == 1

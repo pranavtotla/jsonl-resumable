@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any, Iterator, Union
@@ -385,6 +386,51 @@ class JsonlIndex:
     def __getitem__(self, line_number: int) -> str:
         """Get a line by index (e.g., index[100])."""
         return self.read_line(line_number)
+
+    def sample(self, n: int, *, seed: int | None = None) -> list[Any]:
+        """Random sample of n records from the file.
+
+        Efficiently samples n random lines by:
+        1. Selecting random line numbers
+        2. Sorting them for sequential disk access (minimizes seeks)
+        3. Reading and parsing as JSON
+
+        Args:
+            n: Number of records to sample. If n > total_lines, returns all lines.
+            seed: Random seed for reproducibility. If None, uses system randomness.
+
+        Returns:
+            List of n parsed JSON objects in random order (not sorted by line number).
+
+        Example:
+            >>> index = JsonlIndex("events.jsonl")
+            >>> sample = index.sample(100, seed=42)  # reproducible sample
+        """
+        if self.total_lines == 0:
+            return []
+
+        # Use local Random instance to avoid affecting global state
+        rng = random.Random(seed)
+
+        # Clamp n to available lines
+        n = min(n, self.total_lines)
+
+        # Select random line numbers
+        line_numbers = rng.sample(range(self.total_lines), n)
+
+        # Sort for sequential disk access, but remember original order
+        sorted_indices = sorted(range(n), key=lambda i: line_numbers[i])
+        sorted_line_numbers = [line_numbers[i] for i in sorted_indices]
+
+        # Read in sorted order for disk efficiency
+        sorted_records = self.read_json_many(sorted_line_numbers)
+
+        # Restore original random order
+        result: list[Any] = [None] * n
+        for original_idx, record in zip(sorted_indices, sorted_records):
+            result[original_idx] = record
+
+        return result
 
     def __repr__(self) -> str:
         return f"JsonlIndex({self._file_path!r}, lines={self.total_lines})"
