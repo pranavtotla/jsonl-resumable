@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Any, Iterator, Union
+from typing import IO, TYPE_CHECKING, Any, AsyncIterator, Iterator, Literal, Union
 
 from .batch import BatchProcessor
+from .exceptions import FileDeletedError, LineCorruptedError
 from .models import IndexMeta, JobInfo, JobProgress, LineInfo
 from .persistence import load_index, save_index
 from .progress import delete_job_progress, load_progress
+
+if TYPE_CHECKING:
+    from .async_stream import AsyncRawStreamContext, AsyncStreamContext
 
 
 class JsonlIndex:
@@ -606,3 +611,320 @@ class JsonlIndex:
             ),
             is_stale=is_stale,
         )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Async Iteration API
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _read_line_batch(self, start: int, end: int) -> list[str]:
+        """Read batch of lines synchronously (called from thread pool).
+
+        Single file open + seek for entire batch, minimizing I/O overhead.
+
+        Args:
+            start: First line number (inclusive)
+            end: Last line number (exclusive)
+
+        Returns:
+            List of decoded strings (newlines stripped)
+
+        Raises:
+            FileDeletedError: If file was deleted
+            LineCorruptedError: If line doesn't match expected length
+        """
+        if not self._file_path.exists():
+            raise FileDeletedError(self._file_path)
+
+        lines: list[str] = []
+        with self.open() as f:
+            offset, _ = self.get_offset(start)
+            f.seek(offset)
+
+            for line_num in range(start, end):
+                expected_length = self._lines[line_num].length
+                raw = f.read(expected_length)
+
+                if len(raw) != expected_length:
+                    raise LineCorruptedError(line_num, expected_length, len(raw))
+
+                lines.append(raw.decode("utf-8").rstrip("\n\r"))
+
+        return lines
+
+    def _read_raw_batch(self, start: int, end: int) -> list[bytes]:
+        """Read batch of lines as raw bytes (called from thread pool).
+
+        Args:
+            start: First line number (inclusive)
+            end: Last line number (exclusive)
+
+        Returns:
+            List of raw bytes (with newlines preserved)
+
+        Raises:
+            FileDeletedError: If file was deleted
+            LineCorruptedError: If line doesn't match expected length
+        """
+        if not self._file_path.exists():
+            raise FileDeletedError(self._file_path)
+
+        lines: list[bytes] = []
+        with self.open() as f:
+            offset, _ = self.get_offset(start)
+            f.seek(offset)
+
+            for line_num in range(start, end):
+                expected_length = self._lines[line_num].length
+                raw = f.read(expected_length)
+
+                if len(raw) != expected_length:
+                    raise LineCorruptedError(line_num, expected_length, len(raw))
+
+                lines.append(raw)
+
+        return lines
+
+    async def aiter_from(
+        self,
+        start_line: int = 0,
+        *,
+        batch_size: int = 100,
+        skip: int = 0,
+        limit: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Async iterate decoded lines starting from a specific line.
+
+        Uses batched I/O to minimize thread hops - reads batch_size lines
+        per call to the thread pool, then yields them without blocking.
+
+        Args:
+            start_line: 0-indexed line to start from (default: 0)
+            batch_size: Number of lines to read per thread hop (default: 100)
+            skip: Number of lines to skip from start_line (default: 0)
+            limit: Maximum number of lines to yield (default: None = unlimited)
+
+        Yields:
+            Lines as strings (decoded, newline stripped)
+
+        Example:
+            >>> async for line in index.aiter_from(1000, batch_size=50):
+            ...     event = json.loads(line)
+            ...     await process(event)
+        """
+        effective_start = start_line + skip
+        if effective_start < 0:
+            effective_start = 0
+        if effective_start >= len(self._lines):
+            return
+
+        yielded = 0
+        current_line = effective_start
+
+        while current_line < len(self._lines):
+            if limit is not None and yielded >= limit:
+                break
+
+            # Calculate batch bounds
+            batch_end = min(current_line + batch_size, len(self._lines))
+            if limit is not None:
+                batch_end = min(batch_end, current_line + (limit - yielded))
+
+            # Single thread hop for batch
+            lines = await asyncio.to_thread(
+                self._read_line_batch, current_line, batch_end
+            )
+
+            # Yield from batch (no thread hops)
+            for line in lines:
+                yield line
+                yielded += 1
+
+            current_line = batch_end
+
+    async def aiter_json_from(
+        self,
+        start_line: int = 0,
+        *,
+        batch_size: int = 100,
+        skip: int = 0,
+        limit: int | None = None,
+        on_decode_error: Literal["raise", "skip", "raw"] = "raise",
+    ) -> AsyncIterator[Any]:
+        """Async iterate parsed JSON starting from a specific line.
+
+        Args:
+            start_line: 0-indexed line to start from (default: 0)
+            batch_size: Number of lines to read per thread hop (default: 100)
+            skip: Number of lines to skip from start_line (default: 0)
+            limit: Maximum number of items to yield (default: None = unlimited)
+            on_decode_error: How to handle JSON decode errors:
+                - "raise": Re-raise the JSONDecodeError (default)
+                - "skip": Skip invalid lines silently
+                - "raw": Yield the raw string instead of parsed JSON
+
+        Yields:
+            Parsed JSON objects (or raw strings if on_decode_error="raw")
+
+        Example:
+            >>> async for event in index.aiter_json_from(1000, on_decode_error="skip"):
+            ...     await process(event)
+        """
+        async for line in self.aiter_from(
+            start_line, batch_size=batch_size, skip=skip, limit=limit
+        ):
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                if on_decode_error == "raise":
+                    raise
+                elif on_decode_error == "raw":
+                    yield line
+                # "skip" just continues to next line
+
+    async def aiter_raw_from(
+        self,
+        start_line: int = 0,
+        *,
+        batch_size: int = 100,
+        skip: int = 0,
+        limit: int | None = None,
+    ) -> AsyncIterator[bytes]:
+        """Async iterate raw bytes starting from a specific line.
+
+        Most efficient for proxying data - no decode/encode overhead.
+
+        Args:
+            start_line: 0-indexed line to start from (default: 0)
+            batch_size: Number of lines to read per thread hop (default: 100)
+            skip: Number of lines to skip from start_line (default: 0)
+            limit: Maximum number of lines to yield (default: None = unlimited)
+
+        Yields:
+            Raw bytes (with newlines preserved)
+
+        Example:
+            >>> async for raw in index.aiter_raw_from(1000):
+            ...     await response.write(raw)
+        """
+        effective_start = start_line + skip
+        if effective_start < 0:
+            effective_start = 0
+        if effective_start >= len(self._lines):
+            return
+
+        yielded = 0
+        current_line = effective_start
+
+        while current_line < len(self._lines):
+            if limit is not None and yielded >= limit:
+                break
+
+            batch_end = min(current_line + batch_size, len(self._lines))
+            if limit is not None:
+                batch_end = min(batch_end, current_line + (limit - yielded))
+
+            raw_lines = await asyncio.to_thread(
+                self._read_raw_batch, current_line, batch_end
+            )
+
+            for raw in raw_lines:
+                yield raw
+                yielded += 1
+
+            current_line = batch_end
+
+    def async_stream(
+        self,
+        start_line: int = 0,
+        *,
+        batch_size: int = 100,
+        skip: int = 0,
+        limit: int | None = None,
+        on_decode_error: Literal["raise", "skip", "raw"] = "raise",
+        as_json: bool = True,
+    ) -> "AsyncStreamContext":
+        """Create async streaming context with cleanup guarantees.
+
+        Returns a context manager that validates file state on entry
+        and ensures cleanup on exit.
+
+        Args:
+            start_line: 0-indexed line to start from
+            batch_size: Number of lines to read per thread hop
+            skip: Number of lines to skip from start_line
+            limit: Maximum number of items to yield
+            on_decode_error: How to handle JSON decode errors
+            as_json: If True, parse lines as JSON; if False, return strings
+
+        Returns:
+            AsyncStreamContext for use with `async with`
+
+        Example:
+            >>> async with index.async_stream(start_line=1000) as stream:
+            ...     async for record in stream:
+            ...         await process(record)
+            ...     print(f"Processed {stream.yielded_count} records")
+        """
+        from .async_stream import AsyncStreamContext
+
+        return AsyncStreamContext(
+            self,
+            start_line,
+            batch_size=batch_size,
+            skip=skip,
+            limit=limit,
+            on_decode_error=on_decode_error,
+            as_json=as_json,
+        )
+
+    def async_raw_stream(
+        self,
+        start_line: int = 0,
+        *,
+        batch_size: int = 100,
+        skip: int = 0,
+        limit: int | None = None,
+    ) -> "AsyncRawStreamContext":
+        """Create async raw bytes streaming context.
+
+        Like async_stream but yields raw bytes for maximum efficiency.
+
+        Args:
+            start_line: 0-indexed line to start from
+            batch_size: Number of lines to read per thread hop
+            skip: Number of lines to skip from start_line
+            limit: Maximum number of items to yield
+
+        Returns:
+            AsyncRawStreamContext for use with `async with`
+        """
+        from .async_stream import AsyncRawStreamContext
+
+        return AsyncRawStreamContext(
+            self,
+            start_line,
+            batch_size=batch_size,
+            skip=skip,
+            limit=limit,
+        )
+
+    def iter_raw_from(self, start_line: int = 0) -> Iterator[bytes]:
+        """Sync iterate raw bytes starting from a specific line.
+
+        Args:
+            start_line: 0-indexed line to start from (default: 0)
+
+        Yields:
+            Raw bytes (with newlines preserved)
+        """
+        if start_line < 0:
+            start_line = 0
+        if start_line >= len(self._lines):
+            return
+
+        with self.open() as f:
+            offset, _ = self.get_offset(start_line)
+            f.seek(offset)
+
+            for line in f:
+                yield line
