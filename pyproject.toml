@@ -26,6 +26,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.scripts]
+jsonl-index = "jsonl_resumable.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/pranavtotla/jsonl-resumable"
 Repository = "https://github.com/pranavtotla/jsonl-resumable"
