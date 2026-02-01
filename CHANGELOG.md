@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `jsonl-index sample <file> <n>` - Random sample of n records
 - **Module execution** via `python -m jsonl_resumable`
 - **`sample()` method** for random record selection with optional seed for reproducibility
+- **Resumable batch processing** with automatic checkpointing:
+  - `BatchProcessor` class for processing large files with progress persistence
+  - `index.batch_processor(job_id)` context manager for easy batch processing
+  - Progress saved to `.progress/` directory, survives crashes/restarts
+  - `JobInfo` model for tracking job metadata and progress
+- **Custom exceptions** for better error handling:
+  - `StaleCheckpointError` - When source file changed since checkpoint
+  - `InvalidCheckpointError` - When checkpoint data is corrupted
 - CLI flags: `--json` (machine-readable output), `--pretty` (indented JSON), `--seed` (reproducible sampling)
 
 ### Changed
