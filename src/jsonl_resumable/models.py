@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,3 +50,55 @@ class IndexMeta:
         Returns True if file size and mtime match the indexed values.
         """
         return self.file_size == current_size and self.file_mtime == current_mtime
+
+
+@dataclass
+class JobProgress:
+    """Progress state for a batch processing job.
+
+    Attributes:
+        job_id: Unique identifier for this job
+        position: Next line number to process (0-indexed)
+        file_size: File size in bytes at last checkpoint
+        file_mtime: File modification time at last checkpoint
+        status: Current job status
+        created_at: ISO timestamp when job was created
+        last_checkpoint_at: ISO timestamp of last checkpoint
+        completed_at: ISO timestamp when job completed (None if in progress)
+    """
+
+    job_id: str
+    position: int
+    file_size: int
+    file_mtime: float
+    status: Literal["in_progress", "completed"]
+    created_at: str
+    last_checkpoint_at: str
+    completed_at: str | None = None
+
+
+@dataclass(frozen=True)
+class JobInfo:
+    """Read-only job information exposed to users.
+
+    Attributes:
+        job_id: Unique identifier for this job
+        position: Next line number to process (0-indexed)
+        status: Current job status
+        total_lines: Total lines in the file
+        progress_pct: Completion percentage (0.0-100.0)
+        created_at: When job was created
+        last_checkpoint_at: When last checkpoint was saved
+        completed_at: When job completed (None if in progress)
+        is_stale: True if file changed since last checkpoint
+    """
+
+    job_id: str
+    position: int
+    status: Literal["in_progress", "completed"]
+    total_lines: int
+    progress_pct: float
+    created_at: datetime
+    last_checkpoint_at: datetime
+    completed_at: datetime | None
+    is_stale: bool

@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import random
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import IO, Any, Iterator, Union
 
-from .models import IndexMeta, LineInfo
+from .batch import BatchProcessor
+from .models import IndexMeta, JobInfo, JobProgress, LineInfo
 from .persistence import load_index, save_index
+from .progress import delete_job_progress, load_progress
 
 
 class JsonlIndex:
@@ -434,3 +437,172 @@ class JsonlIndex:
 
     def __repr__(self) -> str:
         return f"JsonlIndex({self._file_path!r}, lines={self.total_lines})"
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Batch Processing API
+    # ─────────────────────────────────────────────────────────────────────
+
+    def batch_processor(
+        self,
+        job_id: str,
+        progress_path: Union[str, Path, None] = None,
+        as_json: bool = True,
+    ) -> BatchProcessor:
+        """Create a resumable batch processor for this file.
+
+        Args:
+            job_id: Unique identifier for this processing job
+            progress_path: Where to store progress. Defaults to {file}.progress
+            as_json: If True, parse lines as JSON; if False, return raw strings
+
+        Returns:
+            BatchProcessor that must be used as a context manager
+
+        Example:
+            >>> with index.batch_processor("my_job") as batch:
+            ...     for line_num, record in batch:
+            ...         result = process(record)
+            ...         batch.checkpoint()
+        """
+        path = Path(progress_path) if progress_path else None
+        return BatchProcessor(self, job_id, path, as_json)
+
+    def list_jobs(
+        self, progress_path: Union[str, Path, None] = None
+    ) -> list[JobInfo]:
+        """List all jobs for this file.
+
+        Args:
+            progress_path: Path to progress file. Defaults to {file}.progress
+
+        Returns:
+            List of JobInfo objects for all known jobs
+        """
+        path = (
+            Path(progress_path)
+            if progress_path
+            else self._file_path.with_suffix(".progress")
+        )
+        jobs = load_progress(path)
+        if not jobs:
+            return []
+
+        stat = self._file_path.stat()
+        result = []
+        for job in jobs.values():
+            result.append(self._job_to_info(job, stat.st_size, stat.st_mtime))
+        return result
+
+    def get_job(
+        self, job_id: str, progress_path: Union[str, Path, None] = None
+    ) -> JobInfo | None:
+        """Get information about a specific job.
+
+        Args:
+            job_id: The job identifier
+            progress_path: Path to progress file. Defaults to {file}.progress
+
+        Returns:
+            JobInfo if job exists, None otherwise
+        """
+        path = (
+            Path(progress_path)
+            if progress_path
+            else self._file_path.with_suffix(".progress")
+        )
+        jobs = load_progress(path)
+        if not jobs or job_id not in jobs:
+            return None
+
+        stat = self._file_path.stat()
+        return self._job_to_info(jobs[job_id], stat.st_size, stat.st_mtime)
+
+    def reset_job(
+        self, job_id: str, progress_path: Union[str, Path, None] = None
+    ) -> bool:
+        """Reset a job to start from the beginning.
+
+        Args:
+            job_id: The job identifier
+            progress_path: Path to progress file. Defaults to {file}.progress
+
+        Returns:
+            True if job was found and reset, False if job didn't exist
+        """
+        path = (
+            Path(progress_path)
+            if progress_path
+            else self._file_path.with_suffix(".progress")
+        )
+        return delete_job_progress(path, job_id)
+
+    def delete_job(
+        self, job_id: str, progress_path: Union[str, Path, None] = None
+    ) -> bool:
+        """Delete a job's progress record.
+
+        Args:
+            job_id: The job identifier
+            progress_path: Path to progress file. Defaults to {file}.progress
+
+        Returns:
+            True if job was found and deleted, False if job didn't exist
+        """
+        return self.reset_job(job_id, progress_path)
+
+    def delete_completed_jobs(
+        self, progress_path: Union[str, Path, None] = None
+    ) -> int:
+        """Delete all completed jobs for this file.
+
+        Args:
+            progress_path: Path to progress file. Defaults to {file}.progress
+
+        Returns:
+            Number of jobs deleted
+        """
+        from .progress import save_progress
+
+        path = (
+            Path(progress_path)
+            if progress_path
+            else self._file_path.with_suffix(".progress")
+        )
+        jobs = load_progress(path)
+        if not jobs:
+            return 0
+
+        completed = [jid for jid, job in jobs.items() if job.status == "completed"]
+        for jid in completed:
+            del jobs[jid]
+
+        if completed:
+            save_progress(path, jobs)
+
+        return len(completed)
+
+    def _job_to_info(
+        self,
+        job: JobProgress,
+        current_size: int,
+        current_mtime: float,
+    ) -> JobInfo:
+        """Convert internal JobProgress to external JobInfo."""
+        is_stale = job.file_size != current_size or job.file_mtime != current_mtime
+        progress_pct = (
+            (job.position / self.total_lines * 100.0) if self.total_lines > 0 else 100.0
+        )
+
+        return JobInfo(
+            job_id=job.job_id,
+            position=job.position,
+            status=job.status,
+            total_lines=self.total_lines,
+            progress_pct=progress_pct,
+            created_at=datetime.fromisoformat(job.created_at),
+            last_checkpoint_at=datetime.fromisoformat(job.last_checkpoint_at),
+            completed_at=(
+                datetime.fromisoformat(job.completed_at) if job.completed_at else None
+            ),
+            is_stale=is_stale,
+        )
